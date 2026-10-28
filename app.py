@@ -634,24 +634,67 @@ with tab_report:
                     mime="text/csv",
                 )
 
-            st.markdown("#### Daily report (easy to copy)")
-            blocks = []
-            for day_string, group in filtered.sort_values(["task_date", "id"]).groupby("task_date", sort=False):
-                blocks.append(date.fromisoformat(day_string).strftime("%A, %d %B %Y"))
-                for _, row in group.iterrows():
-                    line = f"- {row['task']} — {row['status']}"
-                    if str(row["remark"]).strip():
-                        line += f" | Remark: {row['remark']}"
-                    blocks.append(line)
-                blocks.append("")
-            report_text = "\n".join(blocks).strip()
-            st.text_area("Copy this into your work report", report_text, height=240)
-            st.download_button(
-                "⬇️ Download text report",
-                report_text.encode("utf-8"),
-                file_name=f"work_report_{start.isoformat()}_to_{end.isoformat()}.txt",
-                mime="text/plain",
-            )
+        st.markdown("#### Daily activity report — written breakdown")
+        st.caption(
+            "Organised by the date work was started or progress was recorded, not just the original task date. "
+            "Includes follow-ups for tasks started before the selected reporting period. "
+            "Uses all task statuses; the status filter above applies to the summary table."
+        )
+        # Build a dated activity ledger. Start entries are separate from each
+        # follow-up so work done on later days appears on those actual dates.
+        activities = []
+        for task_row in all_tasks.itertuples(index=False):
+            if start.isoformat() <= task_row.task_date <= end.isoformat():
+                activities.append({
+                    "date": task_row.task_date, "task_id": int(task_row.id),
+                    "task": str(task_row.task), "type": "started", "note": "",
+                    "status": "", "order": 0,
+                })
+        for event in all_updates.itertuples(index=False):
+            if start.isoformat() <= event.update_date <= end.isoformat():
+                activities.append({
+                    "date": event.update_date, "task_id": int(event.task_id),
+                    "task": "", "type": "progress", "note": str(event.note or ""),
+                    "status": str(event.status), "order": int(event.id),
+                })
+        tasks_by_id = {int(t.id): str(t.task) for t in all_tasks.itertuples(index=False)}
+        activities.sort(key=lambda x: (x["date"], x["task_id"], x["type"] != "started", x["order"]))
+        report_blocks = ["DAILY WORK ACTIVITY REPORT", f"Reporting period: {start.strftime('%d %B %Y')} – {end.strftime('%d %B %Y')}", ""]
+        by_day = {}
+        for activity in activities:
+            by_day.setdefault(activity["date"], []).append(activity)
+        for day_str, day_items in by_day.items():
+            report_blocks.append(date.fromisoformat(day_str).strftime("%A, %d %B %Y"))
+            report_blocks.append("-" * 45)
+            by_task = {}
+            for entry in day_items:
+                by_task.setdefault(entry["task_id"], []).append(entry)
+            for task_id, task_events in by_task.items():
+                task_name = tasks_by_id.get(task_id, "Task no longer available")
+                report_blocks.append(f"{task_name}")
+                for entry in task_events:
+                    if entry["type"] == "started":
+                        report_blocks.append("  Work planned/started on this date.")
+                    else:
+                        note = entry["note"].strip()
+                        if note:
+                            report_blocks.append(f"  Progress recorded: {note}")
+                        else:
+                            report_blocks.append("  A status update was recorded without an additional remark.")
+                        report_blocks.append(f"  Status recorded: {entry['status']}.")
+                report_blocks.append("")
+            report_blocks.append("")
+        if not activities:
+            report_blocks.append("No task starts or recorded follow-ups for this period.")
+        report_text = "\n".join(report_blocks).strip()
+        st.text_area("Your detailed day-by-day report", report_text, height=360)
+        st.download_button(
+            "⬇️ Download detailed written report",
+            report_text.encode("utf-8"),
+            file_name=f"detailed_daily_report_{start.isoformat()}_to_{end.isoformat()}.txt",
+            mime="text/plain",
+        )
+        st.caption("Only activity actually recorded in the app can appear. Older overwritten remarks cannot be reconstructed.")
 
 st.divider()
 st.caption("Personal workspace  ·  Supabase storage  ·  Export and back up your records regularly")
