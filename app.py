@@ -1,49 +1,18 @@
-from datetime import date
-import pandas as pd
-import streamlit as st
-from supabase import create_client
-
-st.set_page_config(page_title="Daily Work Log", page_icon="📋", layout="wide")
-STATUSES = ["Pending", "Completed", "Not Completed"]
-
-@st.cache_resource
-def get_supabase():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_SECRET_KEY"])
-
-def add_task(task_date, task):
-    get_supabase().table("work_tasks").insert({"task_date": task_date.isoformat(), "task": task.strip()}).execute()
-
-def update_task(task_id, task_date, task, status, remark):
-    get_supabase().table("work_tasks").update({"task_date": task_date.isoformat(), "task": task.strip(), "status": status, "remark": remark.strip()}).eq("id", int(task_id)).execute()
-
-def delete_task(task_id):
-    get_supabase().table("work_tasks").delete().eq("id", int(task_id)).execute()
-
-def read_tasks():
-    # Supabase API returns up to 1,000 rows per request by default; paginate all records.
-    rows = []
-    offset = 0
-    while True:
-        batch = (get_supabase().table("work_tasks")
-                 .select("id,task_date,task,status,remark,created_at,updated_at")
-                 .order("task_date", desc=True).order("id", desc=True)
-                 .range(offset, offset + 999).execute().data or [])
-        rows.extend(batch)
-        if len(batch) < 1000:
-            break
-        offset += 1000
-    return pd.DataFrame(rows, columns=["id", "task_date", "task", "status", "remark", "created_at", "updated_at"])
-
-st.title('📋 Daily Work Log')
-st.caption('Plan your day • Record the outcome • Build a reliable work report')
-
-try:
-    all_tasks = read_tasks()
-except Exception as exc:
-    st.error("Could not connect to Supabase. Check your Streamlit secrets and database setup.")
-    st.exception(exc)
-    st.stop()
-tab_add, tab_update, tab_report = st.tabs(['➕ Add tasks', '✅ End-of-day update', '📊 Work report & history'])
+                st.markdown(f'**{item.task}**')
+                st.caption(f'Originally planned: {original_date.strftime("%d %b %Y")}  ·  {age}')
+                if isinstance(item.remark, str) and item.remark.strip():
+                    st.markdown(f'**Latest remark:** {item.remark}')
+                with st.form(f'pending_form_{item.id}'):
+                    new_status = st.selectbox('Update status', STATUSES, key=f'pending_status_{item.id}')
+                    new_remark = st.text_area('Progress note / remark (optional)', value=item.remark or '', key=f'pending_remark_{item.id}', height=85, placeholder='e.g. Followed up today; still awaiting approval')
+                    save_pending = st.form_submit_button('Save progress', type='primary')
+                    if save_pending:
+                        try:
+                            update_task(item.id, original_date, item.task, new_status, new_remark)
+                            st.rerun()
+                        except Exception:
+                            st.error('Could not save your update. Please try again.')
+                st.caption('Tip: Keep the status Pending and save a new remark to record progress; select Completed to close it.')
 
 with tab_add:
     st.subheader('Add a task or goal')
@@ -157,9 +126,3 @@ with tab_report:
                 blocks.append('')
             report_text = '\n'.join(blocks).strip()
             st.text_area('Copy this into your work report', report_text, height=240)
-            st.download_button('⬇️ Download text report', report_text.encode('utf-8'),
-                               file_name=f'work_report_{start.isoformat()}_to_{end.isoformat()}.txt',
-                               mime='text/plain')
-
-st.divider()
-st.caption("Private work log • Stored in your personal Supabase project • Export records regularly")
