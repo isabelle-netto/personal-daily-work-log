@@ -277,7 +277,7 @@ def add_task(task_date, task):
     get_supabase().table("work_tasks").insert({"task_date": task_date.isoformat(), "task": task.strip()}).execute()
 
 
-def update_task(task_id, task_date, task, status, remark, *, progress_date=None, previous_status=None, previous_remark=None):
+def update_task(task_id, task_date, task, status, remark, *, progress_date=None, previous_status=None, previous_remark=None, history_note=None):
     """Save task and append a dated progress entry when status/remark changes.
 
     Existing remarks remain available in work_tasks; the timeline is append-only.
@@ -291,7 +291,7 @@ def update_task(task_id, task_date, task, status, remark, *, progress_date=None,
             "task_id": int(task_id),
             "update_date": (progress_date or local_today()).isoformat(),
             "status": status,
-        "note": note,
+        "note": note if history_note is None else history_note.strip(),
     }).execute()
 
     client.table("work_tasks").update({
@@ -391,19 +391,22 @@ k2.metric("Completed", today_completed)
 k3.metric("Open pending (all dates)", len(pending_all))
 k4.metric("Not completed", today_unfinished)
 
-st.markdown("""
-<div class="mini-note"><strong>How this works:</strong> Add your tasks for the day, review them later, and use <strong>Pending tasks</strong> as your ongoing follow-up page for unfinished work from any date.</div>
-""", unsafe_allow_html=True)
+# A simple, library-first interface. The plus action is always at the top.
+if "worklog_page" not in st.session_state:
+    st.session_state["worklog_page"] = "Open Library"
 
-tab_pending, tab_add, tab_update, tab_report = st.tabs([
-    "⏳  Pending tasks",
-    "＋  Add tasks",
-    "✓  Daily review",
-    "▤  Reports & history",
-])
+nav_cols = st.columns([1.2, 1.2, 1.2, 1.2, 1])
+for col, label in zip(nav_cols, ["📌 Open Library", "✅ Completed Library", "🗓 Daily Review", "📊 Reports", "＋ Add task"]):
+    dest = {"📌 Open Library": "Open Library", "✅ Completed Library": "Completed Library", "🗓 Daily Review": "Daily Review", "📊 Reports": "Reports", "＋ Add task": "Add Task"}[label]
+    with col:
+        if st.button(label, use_container_width=True, type="primary" if st.session_state["worklog_page"] == dest else "secondary", key=f"nav_{dest}"):
+            st.session_state["worklog_page"] = dest
+            st.rerun()
 
-with tab_pending:
-    st.subheader("Your open tasks")
+page = st.session_state["worklog_page"]
+
+if page == "Open Library":
+    st.subheader("Your open task library")
     st.write("Every unfinished task stays here, regardless of when you added it. Update it whenever you make progress; it disappears only when you change its status.")
     left, right = st.columns([3, 1])
     with left:
@@ -451,7 +454,7 @@ with tab_pending:
                     )
                     new_remark = st.text_area(
                         "Progress note / remark (optional)",
-                        value=item.remark or "",
+                        value="",
                         key=f"pending_remark_{item.id}",
                         height=110,
                         placeholder="e.g. Followed up today; still awaiting approval",
@@ -460,10 +463,11 @@ with tab_pending:
                     if save_pending:
                         try:
                             update_task(
-                                item.id, original_date, item.task, new_status, new_remark,
+                                item.id, original_date, item.task, new_status, new_remark if new_remark.strip() else (item.remark or ""),
                                 progress_date=progress_day,
                                 previous_status=item.status,
                                 previous_remark=item.remark,
+                                history_note=new_remark,
                             )
                             st.success("Progress updated.")
                             st.rerun()
@@ -471,7 +475,40 @@ with tab_pending:
                             st.error("Could not save your update. Please try again.")
                 st.caption("Tip: Keep the status Pending if the work is still open, and update the remark as you make progress.")
 
-with tab_add:
+if page == "Completed Library":
+    st.subheader("Your completed work")
+    st.write("Everything you have finished is kept here. Reopen any task when work resumes — its original date and all recorded follow-ups stay intact.")
+    completed = all_tasks[all_tasks["status"] == "Completed"].copy()
+    q = st.text_input("Search completed tasks", placeholder="Find a past project or task…", key="completed_search")
+    if q.strip():
+        completed = completed[completed["task"].str.contains(q, case=False, regex=False, na=False)]
+    st.caption(f"{len(completed)} completed tasks")
+    if completed.empty:
+        st.info("No completed tasks found yet.")
+    for item in completed.itertuples(index=False):
+        with st.container(border=True):
+            st.markdown(f"#### ✅ {item.task}")
+            st.caption(f"Originally logged {date.fromisoformat(item.task_date).strftime('%d %b %Y')}")
+            if isinstance(item.remark, str) and item.remark.strip():
+                st.write(f"Latest note: {item.remark}")
+            with st.expander("View complete activity timeline"):
+                show_timeline(item.id, all_updates)
+            with st.form(f"reopen_{item.id}"):
+                reopen_day = st.date_input("Date work resumed", value=local_today(), key=f"reopen_date_{item.id}", format="DD/MM/YYYY")
+                reason = st.text_area("Reason / next step (optional)", key=f"reopen_note_{item.id}", placeholder="e.g. Follow-up requested; revising the previous deliverable")
+                if st.form_submit_button("↻ Reopen task", type="primary"):
+                    try:
+                        # Keep the original task_date; record the actual reopening date in history.
+                        update_task(item.id, date.fromisoformat(item.task_date), item.task,
+                                    "Pending", reason.strip() or (item.remark or ""),
+                                    progress_date=reopen_day, previous_status=item.status,
+                                    previous_remark=item.remark, history_note=reason)
+                        st.session_state["worklog_page"] = "Open Library"
+                        st.rerun()
+                    except Exception:
+                        st.error("Could not reopen this task. Please try again.")
+
+if page == "Add Task":
     st.subheader("Add a task or goal")
     st.write("Enter one task at a time for clearer tracking. Every new task starts as Pending.")
     with st.form("new_task_form", clear_on_submit=True):
@@ -487,11 +524,11 @@ with tab_add:
                 st.error("Please type a task before saving.")
             else:
                 add_task(task_date, task)
-                st.success("Task saved.")
+                st.session_state["worklog_page"] = "Open Library"
                 st.rerun()
     st.info("Tip: Smaller, separate tasks make your reports more accurate and easier to review later.")
 
-with tab_update:
+if page == "Daily Review":
     st.subheader("Review your day")
     day = st.date_input("Choose the date to update", value=local_today(), format="DD/MM/YYYY", key="update_day")
     day_tasks = all_tasks[all_tasks["task_date"] == day.isoformat()]
@@ -549,7 +586,7 @@ with tab_update:
                         delete_task(item.id)
                         st.rerun()
 
-with tab_report:
+if page == "Reports":
     st.subheader("Work report & history")
     today = local_today()
     default_start = today.replace(day=1)
